@@ -8,13 +8,8 @@ const log = (...args) => console.error(...args);
 
 log('Starting Zero-Dependency MCP Filesystem Server...');
 
-const targetDir = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
-log(`Restricting access to directory: ${targetDir}`);
-
-function isSafePath(targetPath) {
-    const resolved = path.resolve(targetDir, targetPath);
-    return resolved.startsWith(targetDir);
-}
+const initialTargetDir = process.argv[2] ? path.resolve(process.argv[2]) : process.cwd();
+let realTargetDir = initialTargetDir;
 
 // JSON-RPC State
 let buffer = '';
@@ -31,6 +26,34 @@ function sendResponse(id, result, error = null) {
         response.result = result;
     }
     process.stdout.write(JSON.stringify(response) + '\n');
+}
+
+// Robust path traversal and symlink escape prevention
+async function getSafePath(targetPath) {
+    const resolvedPath = path.resolve(realTargetDir, targetPath);
+    let pathToCheck = resolvedPath;
+    try {
+        pathToCheck = await fs.realpath(resolvedPath);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            const parent = path.dirname(resolvedPath);
+            try {
+                const realParent = await fs.realpath(parent);
+                pathToCheck = path.join(realParent, path.basename(resolvedPath));
+            } catch (parentErr) {
+                throw new Error('Access denied: Invalid directory structure.');
+            }
+        } else {
+            throw new Error(`Filesystem error: ${err.message}`);
+        }
+    }
+    
+    const rel = path.relative(realTargetDir, pathToCheck);
+    const isSafe = !rel.startsWith('..') && !path.isAbsolute(rel);
+    if (!isSafe) {
+        throw new Error('Access denied: Path outside restricted workspace.');
+    }
+    return pathToCheck;
 }
 
 // Handle incoming messages
@@ -97,19 +120,21 @@ async function handleMessage(message) {
             try {
                 if (name === 'list_directory') {
                     const p = args.dirPath || '.';
-                    if (!isSafePath(p)) throw new Error('Access denied: Path outside restricted workspace.');
-                    const items = await fs.readdir(path.resolve(targetDir, p), { withFileTypes: true });
+                    const safePath = await getSafePath(p);
+                    const items = await fs.readdir(safePath, { withFileTypes: true });
                     const formatted = items.map(i => `${i.isDirectory() ? '[DIR] ' : '[FILE]'} ${i.name}`).join('\n');
                     sendResponse(msg.id, { content: [{ type: 'text', text: formatted || '(empty directory)' }] });
                 }
                 else if (name === 'read_file') {
-                    if (!isSafePath(args.filePath)) throw new Error('Access denied: Path outside restricted workspace.');
-                    const content = await fs.readFile(path.resolve(targetDir, args.filePath), 'utf8');
+                    if (!args.filePath) throw new Error('Missing filePath parameter');
+                    const safePath = await getSafePath(args.filePath);
+                    const content = await fs.readFile(safePath, 'utf8');
                     sendResponse(msg.id, { content: [{ type: 'text', text: content }] });
                 }
                 else if (name === 'write_file') {
-                    if (!isSafePath(args.filePath)) throw new Error('Access denied: Path outside restricted workspace.');
-                    await fs.writeFile(path.resolve(targetDir, args.filePath), args.content, 'utf8');
+                    if (!args.filePath || !args.content) throw new Error('Missing filePath or content parameter');
+                    const safePath = await getSafePath(args.filePath);
+                    await fs.writeFile(safePath, args.content, 'utf8');
                     sendResponse(msg.id, { content: [{ type: 'text', text: 'File written successfully.' }] });
                 }
                 else {
@@ -124,23 +149,35 @@ async function handleMessage(message) {
     }
 }
 
-// Read from stdin
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => {
-    buffer += chunk;
-    let lines = buffer.split('\n');
-    buffer = lines.pop(); // Keep incomplete line in buffer
-    
-    for (const line of lines) {
-        if (line.trim()) {
-            handleMessage(line);
-        }
+async function boot() {
+    try {
+        realTargetDir = await fs.realpath(initialTargetDir);
+        log(`Restricting access to resolved workspace directory: ${realTargetDir}`);
+    } catch (e) {
+        log(`Fatal: Could not resolve target directory ${initialTargetDir}`);
+        process.exit(1);
     }
-});
 
-process.stdin.on('end', () => {
-    log('Client disconnected.');
-    process.exit(0);
-});
+    // Read from stdin
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+        buffer += chunk;
+        let lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep incomplete line in buffer
+        
+        for (const line of lines) {
+            if (line.trim()) {
+                handleMessage(line);
+            }
+        }
+    });
 
-log('MCP Filesystem Server is ready. Listening on stdin for JSON-RPC messages...');
+    process.stdin.on('end', () => {
+        log('Client disconnected.');
+        process.exit(0);
+    });
+
+    log('MCP Filesystem Server is ready. Listening on stdin for JSON-RPC messages...');
+}
+
+boot();
