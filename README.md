@@ -11,4 +11,4 @@ npx github:albertstayhome/mcp-filesystem-pro
 ## Support
 
 If you find this useful, please support the development:
-**[Donate on Polar.sh](https://polar.sh/albert-dev)**
+**[Donate on Polar.sh](https://polar.sh/albertstayhome)**
