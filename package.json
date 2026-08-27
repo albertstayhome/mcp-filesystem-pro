@@ -1,0 +1,13 @@
+{
+  "name": "mcp-filesystem-pro",
+  "version": "1.0.0",
+  "description": "Zero-dependency MCP Filesystem server",
+  "bin": {
+    "mcp-filesystem-pro": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "Albert",
+  "license": "MIT"
+}
